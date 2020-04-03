@@ -16,7 +16,14 @@ package slicepool
 
 import (
 	"sync"
+
+	"github.com/eycorsican/go-tun2socks/common/log"
+	_ "github.com/eycorsican/go-tun2socks/common/log/simple" // Register a simple logger.
 )
+
+func init() {
+	log.SetLevel(log.DEBUG)
+}
 
 // Pool wraps a sync.Pool of *[]byte.  To encourage correct usage,
 // all public methods are on slicepool.Slice.
@@ -26,8 +33,11 @@ import (
 // "*[]byte" is used to avoid an allocation due to casting
 // []byte to interface{} when calling sync.Pool.Put.
 type Pool struct {
-	pool *sync.Pool
-	len  int
+	pool           *sync.Pool
+	len            int
+	mu             sync.Mutex
+	outstanding    int
+	maxOutstanding int
 }
 
 // MakePool returns a Pool of slices with the specified length.
@@ -44,6 +54,13 @@ func MakePool(sliceLen int) Pool {
 }
 
 func (p *Pool) get() *[]byte {
+	p.mu.Lock()
+	p.outstanding++
+	if p.outstanding > p.maxOutstanding {
+		p.maxOutstanding = p.outstanding
+		log.Debugf("Max outstanding buffers(%d): %d", p.len, p.maxOutstanding)
+	}
+	p.mu.Unlock()
 	return p.pool.Get().(*[]byte)
 }
 
@@ -51,6 +68,9 @@ func (p *Pool) put(b *[]byte) {
 	if len(*b) != p.len || cap(*b) != p.len {
 		panic("Buffer length mismatch")
 	}
+	p.mu.Lock()
+	p.outstanding--
+	p.mu.Unlock()
 	p.pool.Put(b)
 }
 

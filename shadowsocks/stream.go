@@ -21,9 +21,16 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"github.com/Jigsaw-Code/outline-ss-server/slicepool"
+	"github.com/eycorsican/go-tun2socks/common/log"
+	_ "github.com/eycorsican/go-tun2socks/common/log/simple" // Register a simple logger.
 )
+
+func init() {
+	log.SetLevel(log.DEBUG)
+}
 
 // payloadSizeMask is the maximum size of payload in bytes.
 const payloadSizeMask = 0x3FFF // 16*1024 - 1
@@ -281,6 +288,9 @@ type Reader interface {
 	io.WriterTo
 }
 
+var openReads int32
+var maxOpenReads int32
+
 // NewShadowsocksReader creates a Reader that decrypts the given Reader using
 // the shadowsocks protocol with the given shadowsocks cipher.
 func NewShadowsocksReader(reader io.Reader, ssCipher *Cipher) Reader {
@@ -376,6 +386,11 @@ type readConverter struct {
 }
 
 func (c *readConverter) Read(b []byte) (int, error) {
+	count := atomic.AddInt32(&openReads, 1)
+	if atomic.CompareAndSwapInt32(&maxOpenReads, count-1, count) {
+		log.Warnf("Max open reads: %d", count)
+	}
+	defer atomic.AddInt32(&openReads, -1)
 	if err := c.ensureLeftover(); err != nil {
 		return 0, err
 	}
@@ -385,6 +400,11 @@ func (c *readConverter) Read(b []byte) (int, error) {
 }
 
 func (c *readConverter) WriteTo(w io.Writer) (written int64, err error) {
+	count := atomic.AddInt32(&openReads, 1)
+	if atomic.CompareAndSwapInt32(&maxOpenReads, count-1, count) {
+		log.Warnf("Max open reads: %d", count)
+	}
+	defer atomic.AddInt32(&openReads, -1)
 	for {
 		if err = c.ensureLeftover(); err != nil {
 			if err == io.EOF {
