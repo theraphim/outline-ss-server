@@ -20,6 +20,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"syscall"
 	"time"
 
 	onet "github.com/Jigsaw-Code/outline-ss-server/net"
@@ -299,6 +300,10 @@ func (c *measuredConn) ReadFrom(r io.Reader) (int64, error) {
 	n, err := io.Copy(c.DuplexConn, r)
 	*c.writeCount += n
 	return n, err
+}
+
+func (c *measuredConn) SyscallConn() (syscall.RawConn, error) {
+	return onet.TrySyscallConn(c.DuplexConn)
 }
 
 func MeasureConn(conn onet.DuplexConn, bytesSent, bytesReceived *int64) onet.DuplexConn {
