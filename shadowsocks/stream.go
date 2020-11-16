@@ -47,7 +47,7 @@ var readBufPool = slicepool.MakePool(payloadSizeMask + maxTagSize())
 //
 // This is based on the behavior reportedly used by Google for TLS:
 // https://hpbn.co/transport-layer-security-tls/#tls-optimizations-at-google
-var chunkSizeBoostTriggerAmount int64 = 1024 * 1024
+var chunkSizeBoostTriggerBytes int64 = 1024 * 1024
 var chunkSizeBoostTimeout = time.Second
 
 // Writer is an io.Writer that also implements io.ReaderFrom to
@@ -285,7 +285,7 @@ func (sw *Writer) ReadFrom(r io.Reader) (int64, error) {
 			}
 		}
 		writtenConsecutive += int64(bytesRead)
-		if writtenConsecutive > chunkSizeBoostTriggerAmount {
+		if writtenConsecutive > chunkSizeBoostTriggerBytes {
 			// The socket has been consistently active, so the TCP window has
 			// likely grown.  If the buffer is being filled, increase chunk size
 			// to reduce AEAD overhead.

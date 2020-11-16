@@ -16,7 +16,7 @@ import (
 func init() {
 	// Reduce chunk size boost trigger amount to capture the transition behavior without
 	// having to send many megabytes of data.
-	chunkSizeBoostTriggerAmount = 20_000
+	chunkSizeBoostTriggerBytes = 20_000
 }
 
 func newTestCipher(t *testing.T) *Cipher {
@@ -427,7 +427,7 @@ func TestMSSEndToEnd(t *testing.T) {
 		-1, 0, 1, 2, 32, 33, 34, 35, 36, 500, 600, 1500, 16415, 16416, 16417, 16418, 32768,
 	}
 
-	input := make([]byte, 2*chunkSizeBoostTriggerAmount)
+	input := make([]byte, 2*chunkSizeBoostTriggerBytes)
 	for i := range input {
 		input[i] = byte(i) // Arbitrary test contents
 	}
@@ -465,7 +465,7 @@ func TestMSSSizeCheck(t *testing.T) {
 		1, 2, 3, 500, 1500, 16382, 16383,
 	}
 
-	input := make([]byte, 2*chunkSizeBoostTriggerAmount)
+	input := make([]byte, 2*chunkSizeBoostTriggerBytes)
 
 	for _, payloadSize := range testPayloadSize {
 		payloadSize := payloadSize
@@ -495,7 +495,7 @@ func TestMSSSizeCheck(t *testing.T) {
 					break
 				}
 				var expectedN int
-				if prevTotal <= chunkSizeBoostTriggerAmount {
+				if prevTotal <= chunkSizeBoostTriggerBytes {
 					expectedN = payloadSize
 				} else {
 					expectedN = payloadSizeMask
