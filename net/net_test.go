@@ -20,25 +20,29 @@ import (
 )
 
 func TestLocalhostMSS(t *testing.T) {
-	l, err := net.ListenTCP("tcp", nil)
+	localhost, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := net.ListenTCP("tcp", localhost)
 	if err != nil {
 		t.Fatal(err)
 	}
 	go func() {
-		serverConn, err := l.Accept()
+		serverConn, err := l.AcceptTCP()
+		l.Close()
 		if err != nil {
 			t.Error(err)
 		}
-		mss, err := GetMSS(serverConn.(*net.TCPConn))
+		mss, err := GetMSS(serverConn)
 		if err != nil {
 			t.Error(err)
 		}
 		t.Logf("Server MSS: %d", mss)
 		serverConn.Close()
-		l.Close()
 	}()
-
-	conn, err := net.DialTCP("tcp", nil, l.Addr().(*net.TCPAddr))
+	dst := l.Addr().(*net.TCPAddr)
+	conn, err := net.DialTCP(dst.Network(), nil, dst)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +51,7 @@ func TestLocalhostMSS(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("Client MSS: %d", mss)
-	conn.Read(nil) // Block until the server closes the socket
+	conn.Read(make([]byte, 1)) // Block until the server closes the socket
 }
 
 func TestRemoteMSS(t *testing.T) {
