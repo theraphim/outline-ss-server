@@ -1,22 +1,10 @@
 package net
 
 import (
-	"fmt"
 	"io"
 	"net"
 	"syscall"
 )
-
-// TrySyscallConn returns the RawConn that underlies conn, if conn supports this.
-func TrySyscallConn(conn net.Conn) (syscall.RawConn, error) {
-	supportedConn, ok := conn.(interface {
-		SyscallConn() (syscall.RawConn, error)
-	})
-	if !ok {
-		return nil, fmt.Errorf("No raw conn access: %v", conn)
-	}
-	return supportedConn.SyscallConn()
-}
 
 // DuplexConn is a net.Conn that allows for closing only the reader or writer end of
 // it, supporting half-open state.
@@ -53,9 +41,6 @@ func (dc *duplexConnAdaptor) ReadFrom(r io.Reader) (int64, error) {
 }
 func (dc *duplexConnAdaptor) CloseWrite() error {
 	return dc.DuplexConn.CloseWrite()
-}
-func (dc *duplexConnAdaptor) SyscallConn() (syscall.RawConn, error) {
-	return TrySyscallConn(dc.DuplexConn)
 }
 
 // WrapDuplexConn wraps an existing DuplexConn with new Reader and Writer, but
@@ -116,9 +101,9 @@ func NewConnectionError(status, message string, cause error) *ConnectionError {
 
 // GetMSS returns the TCP Maximum Segment Size if conn is a TCP connection
 // and support RawConn access.
-func GetMSS(conn net.Conn) (mss int, err error) {
+func GetMSS(conn *net.TCPConn) (mss int, err error) {
 	var rawConn syscall.RawConn
-	rawConn, err = TrySyscallConn(conn)
+	rawConn, err = conn.SyscallConn()
 	if err != nil {
 		return
 	}

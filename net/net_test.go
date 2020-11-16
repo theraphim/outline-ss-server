@@ -29,7 +29,7 @@ func TestLocalhostMSS(t *testing.T) {
 		if err != nil {
 			t.Error(err)
 		}
-		mss, err := GetMSS(serverConn)
+		mss, err := GetMSS(serverConn.(*net.TCPConn))
 		if err != nil {
 			t.Error(err)
 		}
@@ -38,7 +38,7 @@ func TestLocalhostMSS(t *testing.T) {
 		l.Close()
 	}()
 
-	conn, err := net.Dial("tcp", l.Addr().String())
+	conn, err := net.DialTCP("tcp", nil, l.Addr().(*net.TCPAddr))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,11 @@ func TestLocalhostMSS(t *testing.T) {
 }
 
 func TestRemoteMSS(t *testing.T) {
-	conn, err := net.Dial("tcp", "www.google.com:443")
+	remote, err := net.ResolveTCPAddr("tcp", "www.google.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.DialTCP("tcp", nil, remote)
 	if err != nil {
 		t.Fatal(err)
 	}
