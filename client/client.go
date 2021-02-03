@@ -2,11 +2,14 @@ package client
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"time"
 
 	onet "github.com/Jigsaw-Code/outline-ss-server/net"
+	"github.com/Jigsaw-Code/outline-ss-server/net/ipset"
 	ss "github.com/Jigsaw-Code/outline-ss-server/shadowsocks"
 	"github.com/Jigsaw-Code/outline-ss-server/slicepool"
 	"github.com/shadowsocks/go-shadowsocks2/socks"
@@ -34,23 +37,25 @@ type Client interface {
 // `host:port`, with authentication parameters `cipher` (AEAD) and `password`.
 // TODO: add a dialer argument to support proxy chaining and transport changes.
 func NewClient(host string, port int, password, cipherName string) (Client, error) {
-	// TODO: consider using net.LookupIP to get a list of IPs, and add logic for optimal selection.
-	proxyIP, err := net.ResolveIPAddr("ip", host)
-	if err != nil {
-		return nil, errors.New("Failed to resolve proxy address")
-	}
 	cipher, err := ss.NewCipher(cipherName, password)
 	if err != nil {
 		return nil, err
 	}
-	d := ssClient{proxyIP: proxyIP.IP, proxyPort: port, cipher: cipher}
+	d := ssClient{proxyHost: host, proxyPort: port, cipher: cipher}
+	// If `host` is a domain name, the client resolves it here to provide clearer
+	// error reporting and simplify UDP forwarding.  If these IPs all stop working,
+	// any TCP connection will re-resolve the name and add a working IP to the set.
+	if err := d.ips.Add(host); err != nil {
+		return nil, fmt.Errorf("Failed to resolve proxy address: %v", err)
+	}
 	return &d, nil
 }
 
 type ssClient struct {
-	proxyIP   net.IP
+	proxyHost string
 	proxyPort int
 	cipher    *ss.Cipher
+	ips       ipset.IPSet
 }
 
 // This code contains an optimization to send the initial client payload along with
@@ -70,8 +75,7 @@ func (c *ssClient) DialTCP(laddr *net.TCPAddr, raddr string) (onet.DuplexConn, e
 	if socksTargetAddr == nil {
 		return nil, errors.New("Failed to parse target address")
 	}
-	proxyAddr := &net.TCPAddr{IP: c.proxyIP, Port: c.proxyPort}
-	proxyConn, err := net.DialTCP("tcp", laddr, proxyAddr)
+	proxyConn, err := c.dialProxy(laddr)
 	if err != nil {
 		return nil, err
 	}
@@ -88,19 +92,42 @@ func (c *ssClient) DialTCP(laddr *net.TCPAddr, raddr string) (onet.DuplexConn, e
 	return onet.WrapConn(proxyConn, ssr, ssw), nil
 }
 
-func (c *ssClient) ListenUDP(laddr *net.UDPAddr) (net.PacketConn, error) {
-	proxyAddr := &net.UDPAddr{IP: c.proxyIP, Port: c.proxyPort}
-	pc, err := net.DialUDP("udp", laddr, proxyAddr)
+func (c *ssClient) dialProxy(laddr *net.TCPAddr) (*net.TCPConn, error) {
+	if confirmedIP := c.ips.Confirmed(); confirmedIP != nil {
+		// Use a known-working IP address for the proxy.
+		proxyAddr := &net.TCPAddr{IP: confirmedIP, Port: c.proxyPort}
+		proxyConn, err := net.DialTCP("tcp", laddr, proxyAddr)
+		if err != nil {
+			c.ips.Disconfirm(confirmedIP)
+		}
+		return proxyConn, err
+	}
+	// Use Go's built-in fallback and Happy Eyeballs logic to identify a working
+	// address.  This will cause redundant DNS queries on a fresh client until an
+	// IP is confirmed, but most OSes have a built-in DNS cache so that should not
+	// be too expensive.
+	// Note: laddr is ignored.  TODO: Remove laddr from the arguments.
+	proxyAddr := net.JoinHostPort(c.proxyHost, strconv.Itoa(c.proxyPort))
+	proxyConn, err := net.Dial("tcp", proxyAddr)
 	if err != nil {
 		return nil, err
 	}
-	conn := packetConn{UDPConn: pc, cipher: c.cipher}
+	c.ips.AddAndConfirm(proxyConn.RemoteAddr().(*net.TCPAddr).IP)
+	return proxyConn.(*net.TCPConn), nil
+}
+
+func (c *ssClient) ListenUDP(laddr *net.UDPAddr) (net.PacketConn, error) {
+	pc, err := net.ListenUDP("udp", laddr)
+	if err != nil {
+		return nil, err
+	}
+	conn := packetConn{UDPConn: pc, client: c}
 	return &conn, nil
 }
 
 type packetConn struct {
 	*net.UDPConn
-	cipher *ss.Cipher
+	client *ssClient
 }
 
 // WriteTo encrypts `b` and writes to `addr` through the proxy.
@@ -112,17 +139,48 @@ func (c *packetConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	lazySlice := udpPool.LazySlice()
 	cipherBuf := lazySlice.Acquire()
 	defer lazySlice.Release()
-	saltSize := c.cipher.SaltSize()
+	saltSize := c.client.cipher.SaltSize()
 	// Copy the SOCKS target address and payload, reserving space for the generated salt to avoid
 	// partially overlapping the plaintext and cipher slices since `Pack` skips the salt when calling
 	// `AEAD.Seal` (see https://golang.org/pkg/crypto/cipher/#AEAD).
 	plaintextBuf := append(append(cipherBuf[saltSize:saltSize], socksTargetAddr...), b...)
-	buf, err := ss.Pack(cipherBuf, plaintextBuf, c.cipher)
+	buf, err := ss.Pack(cipherBuf, plaintextBuf, c.client.cipher)
 	if err != nil {
 		return 0, err
 	}
-	_, err = c.UDPConn.Write(buf)
-	return len(b), err
+	if err := c.send(buf); err != nil {
+		return 0, err
+	}
+	return len(b), nil
+}
+
+func (c *packetConn) send(buf []byte) error {
+	var ips []net.IP
+	if confirmedIP := c.client.ips.Confirmed(); confirmedIP != nil {
+		ips = []net.IP{confirmedIP}
+	} else {
+		// GetAll returns the IPs in shuffled order, so each packet will try
+		// a different IP at random until an IP is confirmed working.
+		ips = c.client.ips.GetAll()
+		if len(ips) == 0 {
+			// If LookupIPAddr never returns ({}, nil), this is unreachable.
+			return errors.New("No IPs for the proxy")
+		}
+	}
+
+	// This loop's main purpose is to skip IPv6 addresses on v4-only clients.
+	var err error
+	proxyAddr := net.UDPAddr{Port: c.client.proxyPort}
+	for _, proxyAddr.IP = range ips {
+		_, err = c.UDPConn.WriteToUDP(buf, &proxyAddr)
+		if err == nil {
+			return nil
+		}
+		// A confirmed address could become non-routable if the IPv6
+		// network interface is disconnected.
+		c.client.ips.Disconfirm(proxyAddr.IP)
+	}
+	return err
 }
 
 // ReadFrom reads from the embedded PacketConn and decrypts into `b`.
@@ -130,12 +188,12 @@ func (c *packetConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	lazySlice := udpPool.LazySlice()
 	cipherBuf := lazySlice.Acquire()
 	defer lazySlice.Release()
-	n, err := c.UDPConn.Read(cipherBuf)
+	n, proxyAddr, err := c.UDPConn.ReadFromUDP(cipherBuf)
 	if err != nil {
 		return 0, nil, err
 	}
 	// Decrypt in-place.
-	buf, err := ss.Unpack(nil, cipherBuf[:n], c.cipher)
+	buf, err := ss.Unpack(nil, cipherBuf[:n], c.client.cipher)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -148,6 +206,7 @@ func (c *packetConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	if len(b) < len(buf)-len(socksSrcAddr) {
 		return n, srcAddr, io.ErrShortBuffer
 	}
+	c.client.ips.Confirm(proxyAddr.IP)
 	return n, srcAddr, nil
 }
 
