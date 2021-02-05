@@ -22,7 +22,7 @@ var udpPool = slicepool.MakePool(clientUDPBufferSize)
 // Client is a client for Shadowsocks TCP and UDP connections.
 type Client interface {
 	// DialTCP connects to `raddr` over TCP though a Shadowsocks proxy.
-	// `laddr` is a local bind address, a local address is automatically chosen if nil.
+	// `laddr` is ignored.  TODO: Remove laddr.
 	// `raddr` has the form `host:port`, where `host` can be a domain name or IP address.
 	DialTCP(laddr *net.TCPAddr, raddr string) (onet.DuplexConn, error)
 
