@@ -9,6 +9,7 @@ import (
 // it, supporting half-open state.
 type DuplexConn interface {
 	net.Conn
+	io.ReaderFrom
 	// Closes the Read end of the connection, allowing for the release of resources.
 	// No more reads should happen.
 	CloseRead() error
@@ -96,4 +97,42 @@ type ConnectionError struct {
 
 func NewConnectionError(status, message string, cause error) *ConnectionError {
 	return &ConnectionError{Status: status, Message: message, Cause: cause}
+}
+
+type ConnMonitor interface {
+	OnRead(int64, error)
+	OnWrite(int64, error)
+}
+
+type monitorConnAdaptor struct {
+	DuplexConn
+	monitor ConnMonitor
+}
+
+func (ec *monitorConnAdaptor) Read(b []byte) (int, error) {
+	n, err := ec.DuplexConn.Read(b)
+	ec.monitor.OnRead(int64(n), err)
+	return n, err
+}
+
+func (ec *monitorConnAdaptor) WriteTo(w io.Writer) (int64, error) {
+	n, err := io.Copy(w, ec.DuplexConn)
+	ec.monitor.OnRead(n, err)
+	return n, err
+}
+
+func (ec *monitorConnAdaptor) Write(b []byte) (int, error) {
+	n, err := ec.DuplexConn.Write(b)
+	ec.monitor.OnWrite(int64(n), err)
+	return n, err
+}
+
+func (ec *monitorConnAdaptor) ReadFrom(r io.Reader) (int64, error) {
+	n, err := ec.DuplexConn.ReadFrom(r)
+	ec.monitor.OnWrite(n, err)
+	return n, err
+}
+
+func MonitorConn(conn DuplexConn, monitor ConnMonitor) DuplexConn {
+	return &monitorConnAdaptor{conn, monitor}
 }
