@@ -63,7 +63,7 @@ func init() {
 
 type ssPort struct {
 	tcpService service.TCPService
-	udpService service.UDPService
+	udpServices []service.UDPService
 	cipherList service.CipherList
 }
 
@@ -74,23 +74,53 @@ type SSServer struct {
 	ports       map[int]*ssPort
 }
 
+func listenAllUDP(portNum int) ([]*net.UDPConn, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil, err
+	}
+	// This assumes that no two interfaces have the same address.
+	var conns []*net.UDPConn
+	for _, addr := range addrs {
+		ip, _, err := net.ParseCIDR(addr.String())
+		if err != nil {
+			return nil, err
+		}
+		if !ip.IsGlobalUnicast() {
+			logger.Debugf("UDP: Skipping unreachable interface %s", addr)
+			continue
+		}
+		udpAddr := &net.UDPAddr{IP: ip, Port: portNum}
+		conn, err := net.ListenUDP("udp", udpAddr)
+		if err != nil {
+			return nil, err
+		}
+		logger.Debugf("UDP: Listening on %v", udpAddr)
+		conns = append(conns, conn)
+	}
+	return conns, nil
+}
+
 func (s *SSServer) startPort(portNum int) error {
 	listener, err := net.ListenTCP("tcp", &net.TCPAddr{Port: portNum})
 	if err != nil {
 		return fmt.Errorf("Failed to start TCP on port %v: %v", portNum, err)
 	}
-	packetConn, err := net.ListenUDP("udp", &net.UDPAddr{Port: portNum})
+	udpConns, err := listenAllUDP(portNum)
 	if err != nil {
 		return fmt.Errorf("Failed to start UDP on port %v: %v", portNum, err)
 	}
 	logger.Infof("Listening TCP and UDP on port %v", portNum)
 	port := &ssPort{cipherList: service.NewCipherList()}
+	s.ports[portNum] = port
 	// TODO: Register initial data metrics at zero.
 	port.tcpService = service.NewTCPService(port.cipherList, &s.replayCache, s.m, tcpReadTimeout)
-	port.udpService = service.NewUDPService(s.natTimeout, port.cipherList, s.m)
-	s.ports[portNum] = port
 	go port.tcpService.Serve(listener)
-	go port.udpService.Serve(packetConn)
+	port.udpServices = make([]service.UDPService, len(udpConns))
+	for i, udpConn := range udpConns {
+		port.udpServices[i] = service.NewUDPService(s.natTimeout, port.cipherList, s.m)
+		go port.udpServices[i].Serve(udpConn)
+	}
 	return nil
 }
 
@@ -100,7 +130,12 @@ func (s *SSServer) removePort(portNum int) error {
 		return fmt.Errorf("Port %v doesn't exist", portNum)
 	}
 	tcpErr := port.tcpService.Stop()
-	udpErr := port.udpService.Stop()
+	var udpErr error
+	for _, udpService := range port.udpServices {
+		if err := udpService.Stop(); err != nil && udpErr == nil {
+			udpErr = err
+		}
+	}
 	delete(s.ports, portNum)
 	if tcpErr != nil {
 		return fmt.Errorf("Failed to close listener on %v: %v", portNum, tcpErr)
