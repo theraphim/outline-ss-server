@@ -35,6 +35,7 @@ const timeout = 5 * time.Minute
 var clientAddr = net.UDPAddr{IP: []byte{192, 0, 2, 1}, Port: 12345}
 var targetAddr = net.UDPAddr{IP: []byte{192, 0, 2, 2}, Port: 54321}
 var dnsAddr = net.UDPAddr{IP: []byte{192, 0, 2, 3}, Port: 53}
+var proxyIP net.IP = []byte{192,0,2, 4}
 var natCipher *ss.Cipher
 
 func init() {
@@ -203,7 +204,7 @@ func assertAlmostEqual(t *testing.T, a, b time.Time) {
 
 func TestNATEmpty(t *testing.T) {
 	nat := newNATmap(timeout, &natTestMetrics{}, &sync.WaitGroup{})
-	if nat.Get("foo") != nil {
+	if nat.Get(&clientAddr, proxyIP) != nil {
 		t.Error("Expected nil value from empty NAT map")
 	}
 }
@@ -212,8 +213,8 @@ func setupNAT() (*fakePacketConn, *fakePacketConn, *natconn) {
 	nat := newNATmap(timeout, &natTestMetrics{}, &sync.WaitGroup{})
 	clientConn := makePacketConn()
 	targetConn := makePacketConn()
-	nat.Add(&clientAddr, clientConn, natCipher, targetConn, "ZZ", "key id")
-	entry := nat.Get(clientAddr.String())
+	nat.Add(&clientAddr, proxyIP, clientConn, natCipher, targetConn, "ZZ", "key id")
+	entry := nat.Get(&clientAddr, proxyIP)
 	return clientConn, targetConn, entry
 }
 
@@ -478,7 +479,7 @@ func TestUDPDoubleServe(t *testing.T) {
 
 	c := make(chan error)
 	for i := 0; i < 2; i++ {
-		clientConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+		clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 		if err != nil {
 			t.Fatalf("ListenUDP failed: %v", err)
 		}
@@ -513,7 +514,7 @@ func TestUDPEarlyStop(t *testing.T) {
 	if err := s.Stop(); err != nil {
 		t.Error(err)
 	}
-	clientConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 	if err != nil {
 		t.Fatalf("ListenUDP failed: %v", err)
 	}

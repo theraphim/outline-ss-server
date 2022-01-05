@@ -135,7 +135,7 @@ func (s *udpService) Serve(clientConn net.PacketConn) error {
 			}()
 
 			// Attempt to read an upstream packet.
-			clientProxyBytes, clientAddr, err := clientConn.ReadFrom(cipherBuf)
+			clientProxyBytes, clientAddr, proxyIP, err := onet.ReadFromWithDst(clientConn, cipherBuf)
 			if err != nil {
 				s.mu.RLock()
 				stopped = s.stopped
@@ -171,7 +171,7 @@ func (s *udpService) Serve(clientConn net.PacketConn) error {
 			cipherData := cipherBuf[:clientProxyBytes]
 			var payload []byte
 			var tgtUDPAddr *net.UDPAddr
-			targetConn := nm.Get(clientAddr.String())
+			targetConn := nm.Get(clientAddr, proxyIP)
 			if targetConn == nil {
 				var locErr error
 				clientLocation, locErr = s.m.GetLocation(clientAddr)
@@ -180,7 +180,7 @@ func (s *udpService) Serve(clientConn net.PacketConn) error {
 				}
 				debugUDPAddr(clientAddr, "Got location \"%s\"", clientLocation)
 
-				ip := clientAddr.(*net.UDPAddr).IP
+				ip := clientAddr.IP
 				var textData []byte
 				var cipher *ss.Cipher
 				unpackStart := time.Now()
@@ -200,7 +200,7 @@ func (s *udpService) Serve(clientConn net.PacketConn) error {
 				if err != nil {
 					return onet.NewConnectionError("ERR_CREATE_SOCKET", "Failed to create UDP socket", err)
 				}
-				targetConn = nm.Add(clientAddr, clientConn, cipher, udpConn, clientLocation, keyID)
+				targetConn = nm.Add(clientAddr, proxyIP, clientConn, cipher, udpConn, clientLocation, keyID)
 			} else {
 				clientLocation = targetConn.clientLocation
 
@@ -335,10 +335,19 @@ func (c *natconn) ReadFrom(buf []byte) (int, net.Addr, error) {
 	return n, addr, err
 }
 
+type natkey struct {
+	clientAddr string // TODO: Use netip.AddrPort
+	proxyIP string // TODO: Use netip.Addr
+}
+
+func makeNATKey(clientAddr *net.UDPAddr, proxyIP net.IP) natkey {
+	return natkey{clientAddr.String(), proxyIP.String()}
+}
+
 // Packet NAT table
 type natmap struct {
 	sync.RWMutex
-	keyConn map[string]*natconn
+	keyConn map[natkey]*natconn
 	timeout time.Duration
 	metrics metrics.ShadowsocksMetrics
 	running *sync.WaitGroup
@@ -346,18 +355,18 @@ type natmap struct {
 
 func newNATmap(timeout time.Duration, sm metrics.ShadowsocksMetrics, running *sync.WaitGroup) *natmap {
 	m := &natmap{metrics: sm, running: running}
-	m.keyConn = make(map[string]*natconn)
+	m.keyConn = make(map[natkey]*natconn)
 	m.timeout = timeout
 	return m
 }
 
-func (m *natmap) Get(key string) *natconn {
+func (m *natmap) Get(clientAddr *net.UDPAddr, proxyIP net.IP) *natconn {
 	m.RLock()
 	defer m.RUnlock()
-	return m.keyConn[key]
+	return m.keyConn[makeNATKey(clientAddr, proxyIP)]
 }
 
-func (m *natmap) set(key string, pc net.PacketConn, cipher *ss.Cipher, keyID, clientLocation string) *natconn {
+func (m *natmap) set(key natkey, pc net.PacketConn, cipher *ss.Cipher, keyID, clientLocation string) *natconn {
 	entry := &natconn{
 		PacketConn:     pc,
 		cipher:         cipher,
@@ -373,7 +382,7 @@ func (m *natmap) set(key string, pc net.PacketConn, cipher *ss.Cipher, keyID, cl
 	return entry
 }
 
-func (m *natmap) del(key string) net.PacketConn {
+func (m *natmap) del(key natkey) net.PacketConn {
 	m.Lock()
 	defer m.Unlock()
 
@@ -385,15 +394,16 @@ func (m *natmap) del(key string) net.PacketConn {
 	return nil
 }
 
-func (m *natmap) Add(clientAddr net.Addr, clientConn net.PacketConn, cipher *ss.Cipher, targetConn net.PacketConn, clientLocation, keyID string) *natconn {
-	entry := m.set(clientAddr.String(), targetConn, cipher, keyID, clientLocation)
+func (m *natmap) Add(clientAddr *net.UDPAddr, proxyIP net.IP, clientConn net.PacketConn, cipher *ss.Cipher, targetConn net.PacketConn, clientLocation, keyID string) *natconn {
+	key := makeNATKey(clientAddr, proxyIP)
+	entry := m.set(key, targetConn, cipher, keyID, clientLocation)
 
 	m.metrics.AddUDPNatEntry()
 	m.running.Add(1)
 	go func() {
-		timedCopy(clientAddr, clientConn, entry, keyID, m.metrics)
+		timedCopy(clientAddr, proxyIP, clientConn, entry, keyID, m.metrics)
 		m.metrics.RemoveUDPNatEntry()
-		if pc := m.del(clientAddr.String()); pc != nil {
+		if pc := m.del(key); pc != nil {
 			pc.Close()
 		}
 		m.running.Done()
@@ -420,7 +430,7 @@ func (m *natmap) Close() error {
 var maxAddrLen int = len(socks.ParseAddr("[2001:db8::1]:12345"))
 
 // copy from target to client until read timeout
-func timedCopy(clientAddr net.Addr, clientConn net.PacketConn, targetConn *natconn,
+func timedCopy(clientAddr *net.UDPAddr, proxyIP net.IP, clientConn net.PacketConn, targetConn *natconn,
 	keyID string, sm metrics.ShadowsocksMetrics) {
 	// pkt is used for in-place encryption of downstream UDP packets, with the layout
 	// [padding?][salt][address][body][tag][extra]
@@ -475,7 +485,7 @@ func timedCopy(clientAddr net.Addr, clientConn net.PacketConn, targetConn *natco
 			if err != nil {
 				return onet.NewConnectionError("ERR_PACK", "Failed to pack data to client", err)
 			}
-			proxyClientBytes, err = clientConn.WriteTo(buf, clientAddr)
+			proxyClientBytes, err = onet.WriteToWithSrc(clientConn, buf, proxyIP, clientAddr)
 			if err != nil {
 				return onet.NewConnectionError("ERR_WRITE", "Failed to write to client", err)
 			}
