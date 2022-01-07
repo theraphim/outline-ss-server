@@ -17,6 +17,7 @@ package service
 import (
 	"bytes"
 	"errors"
+	"io"
 	"net"
 	"sync"
 	"testing"
@@ -35,7 +36,7 @@ const timeout = 5 * time.Minute
 var clientAddr = net.UDPAddr{IP: []byte{192, 0, 2, 1}, Port: 12345}
 var targetAddr = net.UDPAddr{IP: []byte{192, 0, 2, 2}, Port: 54321}
 var dnsAddr = net.UDPAddr{IP: []byte{192, 0, 2, 3}, Port: 53}
-var proxyIP net.IP = []byte{192,0,2, 4}
+var proxyIP net.IP = []byte{192, 0, 2, 4}
 var natCipher *ss.Cipher
 
 func init() {
@@ -44,7 +45,8 @@ func init() {
 }
 
 type packet struct {
-	addr    net.Addr
+	remote  *net.UDPAddr
+	local   net.IP
 	payload []byte
 	err     error
 }
@@ -69,20 +71,29 @@ func (conn *fakePacketConn) SetReadDeadline(deadline time.Time) error {
 }
 
 func (conn *fakePacketConn) WriteTo(payload []byte, addr net.Addr) (int, error) {
-	conn.send <- packet{addr, payload, nil}
+	return conn.WriteToFrom(payload, addr.(*net.UDPAddr), nil)
+}
+
+func (conn *fakePacketConn) WriteToFrom(payload []byte, dst *net.UDPAddr, src net.IP) (int, error) {
+	conn.send <- packet{dst, src, payload, nil}
 	return len(payload), nil
 }
 
 func (conn *fakePacketConn) ReadFrom(buffer []byte) (int, net.Addr, error) {
+	n, src, _, err := conn.ReadToFrom(buffer)
+	return n, src, err
+}
+
+func (conn *fakePacketConn) ReadToFrom(buffer []byte) (int, *net.UDPAddr, net.IP, error) {
 	pkt, ok := <-conn.recv
 	if !ok {
-		return 0, nil, errors.New("Receive closed")
+		return 0, nil, nil, errors.New("Receive closed")
 	}
 	n := copy(buffer, pkt.payload)
 	if n < len(pkt.payload) {
-		return n, pkt.addr, errors.New("Buffer was too short")
+		return n, pkt.remote, pkt.local, io.ErrShortBuffer
 	}
-	return n, pkt.addr, pkt.err
+	return n, pkt.remote, pkt.local, pkt.err
 }
 
 func (conn *fakePacketConn) Close() error {
@@ -142,10 +153,11 @@ func sendToDiscard(payloads [][]byte, validator onet.TargetIPValidator) *natTest
 		ciphertext := make([]byte, cipher.SaltSize()+len(plaintext)+cipher.TagSize())
 		ss.Pack(ciphertext, plaintext, cipher)
 		clientConn.recv <- packet{
-			addr: &net.UDPAddr{
+			remote: &net.UDPAddr{
 				IP:   net.ParseIP("192.0.2.1"),
 				Port: 54321,
 			},
+			local:   proxyIP,
 			payload: ciphertext,
 		}
 	}
@@ -239,8 +251,8 @@ func TestNATWrite(t *testing.T) {
 	if !bytes.Equal(sent.payload, buf) {
 		t.Errorf("Mismatched payload: %v != %v", sent.payload, buf)
 	}
-	if sent.addr != &targetAddr {
-		t.Errorf("Mismatched address: %v != %v", sent.addr, &targetAddr)
+	if sent.remote != &targetAddr {
+		t.Errorf("Mismatched address: %v != %v", sent.remote, &targetAddr)
 	}
 }
 
@@ -256,8 +268,8 @@ func TestNATWriteDNS(t *testing.T) {
 	if !bytes.Equal(sent.payload, buf) {
 		t.Errorf("Mismatched payload: %v != %v", sent.payload, buf)
 	}
-	if sent.addr != &dnsAddr {
-		t.Errorf("Mismatched address: %v != %v", sent.addr, &targetAddr)
+	if sent.remote != &dnsAddr {
+		t.Errorf("Mismatched address: %v != %v", sent.remote, &targetAddr)
 	}
 }
 
@@ -298,7 +310,7 @@ func TestNATFastClose(t *testing.T) {
 	sent := <-targetConn.send
 	// Send the response.
 	response := []byte{1, 2, 3, 4, 5}
-	received := packet{addr: &dnsAddr, payload: response}
+	received := packet{remote: &dnsAddr, payload: response}
 	targetConn.recv <- received
 	sent, ok := <-clientConn.send
 	if !ok {
@@ -307,8 +319,11 @@ func TestNATFastClose(t *testing.T) {
 	if len(sent.payload) <= len(response) {
 		t.Error("Packet is too short to be shadowsocks-AEAD")
 	}
-	if sent.addr != &clientAddr {
-		t.Errorf("Address mismatch: %v != %v", sent.addr, clientAddr)
+	if sent.remote != &clientAddr {
+		t.Errorf("Address mismatch: %v != %v", sent.remote, clientAddr)
+	}
+	if !proxyIP.Equal(sent.local) {
+		t.Errorf("Proxy IP mismatch: %v != %v", sent.local, proxyIP)
 	}
 
 	// targetConn should be scheduled to close immediately.
@@ -324,7 +339,7 @@ func TestNATNoFastClose_NotDNS(t *testing.T) {
 	sent := <-targetConn.send
 	// Send the response.
 	response := []byte{1, 2, 3, 4, 5}
-	received := packet{addr: &targetAddr, payload: response}
+	received := packet{remote: &targetAddr, payload: response}
 	targetConn.recv <- received
 	sent, ok := <-clientConn.send
 	if !ok {
@@ -333,8 +348,8 @@ func TestNATNoFastClose_NotDNS(t *testing.T) {
 	if len(sent.payload) <= len(response) {
 		t.Error("Packet is too short to be shadowsocks-AEAD")
 	}
-	if sent.addr != &clientAddr {
-		t.Errorf("Address mismatch: %v != %v", sent.addr, clientAddr)
+	if sent.remote != &clientAddr {
+		t.Errorf("Address mismatch: %v != %v", sent.remote, clientAddr)
 	}
 	// targetConn should be scheduled to close after the full timeout.
 	assertAlmostEqual(t, targetConn.deadline, time.Now().Add(timeout))
@@ -353,7 +368,7 @@ func TestNATNoFastClose_MultipleDNS(t *testing.T) {
 
 	// Send a response.
 	response := []byte{1, 2, 3, 4, 5}
-	received := packet{addr: &dnsAddr, payload: response}
+	received := packet{remote: &dnsAddr, payload: response}
 	targetConn.recv <- received
 	<-clientConn.send
 
@@ -390,6 +405,65 @@ func TestNATTimeout(t *testing.T) {
 	}
 	// targetConn should be closed as soon as the timeout error is received.
 	assertAlmostEqual(t, before, time.Now())
+}
+
+func TestNATMultipleProxyIPs(t *testing.T) {
+	nat := newNATmap(timeout, &natTestMetrics{}, &sync.WaitGroup{})
+	clientConn := makePacketConn()
+	targetConn1 := makePacketConn()
+	nat.Add(&clientAddr, proxyIP, clientConn, natCipher, targetConn1, "ZZ", "key id")
+	entry1 := nat.Get(&clientAddr, proxyIP)
+	targetConn2 := makePacketConn()
+	proxyIP2 := net.ParseIP("192.0.2.123")
+	nat.Add(&clientAddr, proxyIP2, clientConn, natCipher, targetConn2, "ZZ", "key id")
+	entry2 := nat.Get(&clientAddr, proxyIP2)
+
+	// Send a standard packet on entry 1.
+	entry1.WriteTo([]byte{1}, &targetAddr)
+	assertAlmostEqual(t, targetConn1.deadline, time.Now().Add(timeout))
+	<-targetConn1.send
+
+	// Send a DNS packet on entry 2.
+	entry2.WriteTo([]byte{2}, &dnsAddr)
+	// DNS-only connections have a fixed timeout of 17 seconds.
+	assertAlmostEqual(t, targetConn2.deadline, time.Now().Add(17*time.Second))
+	<-targetConn2.send
+
+	// Send a reply on entry 1 and verify that it is sent from `proxyIP`.
+	targetConn1.recv <- packet{&targetAddr, nil, []byte{3}, nil}
+	ss1, ok := <-clientConn.send
+	if !ok {
+		t.Error("clientConn was closed")
+	}
+	if len(ss1.payload) <= 1 {
+		t.Error("Packet is too short to be shadowsocks-AEAD")
+	}
+	if ss1.remote != &clientAddr {
+		t.Errorf("Address mismatch: %v != %v", ss1.remote, clientAddr)
+	}
+	if !proxyIP.Equal(ss1.local) {
+		t.Errorf("Mismatched proxy IP: %v != %v", ss1.local, proxyIP)
+	}
+	// `targetConn1` is not DNS, so it's still open.
+	assertAlmostEqual(t, targetConn1.deadline, time.Now().Add(timeout))
+
+	// Send a reply on entry 2 and verify that it is sent from `proxyIP2`.
+	targetConn2.recv <- packet{&dnsAddr, nil, []byte{4}, nil}
+	ss2, ok := <-clientConn.send
+	if !ok {
+		t.Error("clientConn was closed")
+	}
+	if len(ss2.payload) <= 1 {
+		t.Error("Packet is too short to be shadowsocks-AEAD")
+	}
+	if ss2.remote != &clientAddr {
+		t.Errorf("Address mismatch: %v != %v", ss2.remote, clientAddr)
+	}
+	if !proxyIP2.Equal(ss2.local) {
+		t.Errorf("Mismatched proxy IP: %v != %v", ss2.local, proxyIP)
+	}
+	// `targetConn2`` should be scheduled to close immediately.
+	assertAlmostEqual(t, targetConn2.deadline, time.Now())
 }
 
 // Simulates receiving invalid UDP packets on a server with 100 ciphers.
@@ -452,6 +526,9 @@ func BenchmarkUDPUnpackSharedKey(b *testing.B) {
 	snapshot := cipherList.SnapshotForClientIP(nil)
 	cipher := snapshot[0].Value.(*CipherEntry).Cipher
 	packet, err := ss.Pack(make([]byte, serverUDPBufferSize), plaintext, cipher)
+	if err != nil {
+		b.Fatal(err)
+	}
 
 	const numIPs = 100 // Must be <256
 	ips := [numIPs]net.IP{}
@@ -479,12 +556,8 @@ func TestUDPDoubleServe(t *testing.T) {
 
 	c := make(chan error)
 	for i := 0; i < 2; i++ {
-		clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
-		if err != nil {
-			t.Fatalf("ListenUDP failed: %v", err)
-		}
 		go func() {
-			err := s.Serve(clientConn)
+			err := s.Serve(makePacketConn())
 			if err != nil {
 				c <- err
 				close(c)
@@ -514,11 +587,7 @@ func TestUDPEarlyStop(t *testing.T) {
 	if err := s.Stop(); err != nil {
 		t.Error(err)
 	}
-	clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
-	if err != nil {
-		t.Fatalf("ListenUDP failed: %v", err)
-	}
-	if err := s.Serve(clientConn); err != nil {
+	if err := s.Serve(makePacketConn()); err != nil {
 		t.Error(err)
 	}
 }

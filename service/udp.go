@@ -71,7 +71,7 @@ func findAccessKeyUDP(clientIP net.IP, dst, src []byte, cipherList CipherList) (
 
 type udpService struct {
 	mu                sync.RWMutex // Protects .clientConn and .stopped
-	clientConn        net.PacketConn
+	clientConn        onet.UDPAnyConn
 	stopped           bool
 	natTimeout        time.Duration
 	ciphers           CipherList
@@ -90,7 +90,7 @@ type UDPService interface {
 	// SetTargetIPValidator sets the function to be used to validate the target IP addresses.
 	SetTargetIPValidator(targetIPValidator onet.TargetIPValidator)
 	// Serve adopts the clientConn, and will not return until it is closed by Stop().
-	Serve(clientConn net.PacketConn) error
+	Serve(clientConn onet.UDPAnyConn) error
 	// Stop closes the clientConn and prevents further forwarding of packets.
 	Stop() error
 	// GracefulStop calls Stop(), and then blocks until all resources have been cleaned up.
@@ -103,7 +103,7 @@ func (s *udpService) SetTargetIPValidator(targetIPValidator onet.TargetIPValidat
 
 // Listen on addr for encrypted packets and basically do UDP NAT.
 // We take the ciphers as a pointer because it gets replaced on config updates.
-func (s *udpService) Serve(clientConn net.PacketConn) error {
+func (s *udpService) Serve(clientConn onet.UDPAnyConn) error {
 	s.mu.Lock()
 	if s.clientConn != nil {
 		s.mu.Unlock()
@@ -135,7 +135,7 @@ func (s *udpService) Serve(clientConn net.PacketConn) error {
 			}()
 
 			// Attempt to read an upstream packet.
-			clientProxyBytes, clientAddr, proxyIP, err := onet.ReadFromWithDst(clientConn, cipherBuf)
+			clientProxyBytes, clientAddr, proxyIP, err := clientConn.ReadToFrom(cipherBuf)
 			if err != nil {
 				s.mu.RLock()
 				stopped = s.stopped
@@ -337,7 +337,7 @@ func (c *natconn) ReadFrom(buf []byte) (int, net.Addr, error) {
 
 type natkey struct {
 	clientAddr string // TODO: Use netip.AddrPort
-	proxyIP string // TODO: Use netip.Addr
+	proxyIP    string // TODO: Use netip.Addr
 }
 
 func makeNATKey(clientAddr *net.UDPAddr, proxyIP net.IP) natkey {
@@ -394,7 +394,7 @@ func (m *natmap) del(key natkey) net.PacketConn {
 	return nil
 }
 
-func (m *natmap) Add(clientAddr *net.UDPAddr, proxyIP net.IP, clientConn net.PacketConn, cipher *ss.Cipher, targetConn net.PacketConn, clientLocation, keyID string) *natconn {
+func (m *natmap) Add(clientAddr *net.UDPAddr, proxyIP net.IP, clientConn onet.UDPAnyConn, cipher *ss.Cipher, targetConn net.PacketConn, clientLocation, keyID string) *natconn {
 	key := makeNATKey(clientAddr, proxyIP)
 	entry := m.set(key, targetConn, cipher, keyID, clientLocation)
 
@@ -430,7 +430,7 @@ func (m *natmap) Close() error {
 var maxAddrLen int = len(socks.ParseAddr("[2001:db8::1]:12345"))
 
 // copy from target to client until read timeout
-func timedCopy(clientAddr *net.UDPAddr, proxyIP net.IP, clientConn net.PacketConn, targetConn *natconn,
+func timedCopy(clientAddr *net.UDPAddr, proxyIP net.IP, clientConn onet.UDPAnyConn, targetConn *natconn,
 	keyID string, sm metrics.ShadowsocksMetrics) {
 	// pkt is used for in-place encryption of downstream UDP packets, with the layout
 	// [padding?][salt][address][body][tag][extra]
@@ -485,7 +485,7 @@ func timedCopy(clientAddr *net.UDPAddr, proxyIP net.IP, clientConn net.PacketCon
 			if err != nil {
 				return onet.NewConnectionError("ERR_PACK", "Failed to pack data to client", err)
 			}
-			proxyClientBytes, err = onet.WriteToWithSrc(clientConn, buf, proxyIP, clientAddr)
+			proxyClientBytes, err = clientConn.WriteToFrom(buf, clientAddr, proxyIP)
 			if err != nil {
 				return onet.NewConnectionError("ERR_WRITE", "Failed to write to client", err)
 			}

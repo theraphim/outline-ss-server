@@ -72,7 +72,7 @@ func startTCPEchoServer(t testing.TB) (*net.TCPListener, *sync.WaitGroup) {
 }
 
 func startUDPEchoServer(t testing.TB) (*net.UDPConn, *sync.WaitGroup) {
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 	if err != nil {
 		t.Fatalf("Proxy ListenUDP failed: %v", err)
 	}
@@ -256,9 +256,9 @@ func (m *fakeUDPMetrics) RemoveUDPNatEntry() {
 func TestUDPEcho(t *testing.T) {
 	echoConn, echoRunning := startUDPEchoServer(t)
 
-	proxyConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	proxyConn, err := onet.ListenAnyUDP4(0)
 	if err != nil {
-		t.Fatalf("ListenTCP failed: %v", err)
+		t.Fatalf("ListenAnyUDP4 failed: %v", err)
 	}
 	secrets := ss.MakeTestSecrets(1)
 	cipherList, err := service.MakeTestCiphers(secrets)
@@ -347,6 +347,118 @@ func TestUDPEcho(t *testing.T) {
 			record.out <= record.in {
 			t.Errorf("Bad upstream metrics: %v", record)
 		}
+	}
+}
+
+// Test that UDP packets addressed to different proxy IPs produce replies
+// from the corresponding proxy IP.
+func TestUDPEchoMultipleIP(t *testing.T) {
+	echoConn, echoRunning := startUDPEchoServer(t)
+
+	proxyConn, err := onet.ListenAnyUDP4(0)
+	if err != nil {
+		t.Fatalf("ListenAnyUDP4 failed: %v", err)
+	}
+	secrets := ss.MakeTestSecrets(1)
+	cipherList, err := service.MakeTestCiphers(secrets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testMetrics := &fakeUDPMetrics{fakeLocation: "QQ"}
+	proxy := service.NewUDPService(time.Hour, cipherList, testMetrics)
+	proxy.SetTargetIPValidator(allowAll)
+	go proxy.Serve(proxyConn)
+
+	_, proxyPort, err := net.SplitHostPort(proxyConn.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	portNum, err := strconv.Atoi(proxyPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client1, err := client.NewClient("127.0.0.1", portNum, secrets[0], ss.TestCipher)
+	if err != nil {
+		t.Fatalf("Failed to create ShadowsocksClient: %v", err)
+	}
+	client2, err := client.NewClient("127.0.0.2", portNum, secrets[0], ss.TestCipher)
+	if err != nil {
+		t.Fatalf("Failed to create ShadowsocksClient: %v", err)
+	}
+	conn1, err := client1.ListenUDP(nil)
+	if err != nil {
+		t.Fatalf("ShadowsocksClient.ListenUDP failed: %v", err)
+	}
+	conn2, err := client2.ListenUDP(nil)
+	if err != nil {
+		t.Fatalf("ShadowsocksClient.ListenUDP failed: %v", err)
+	}
+
+	const N = 1000
+	up1 := ss.MakeTestPayload(N)
+	n, err := conn1.WriteTo(up1, echoConn.LocalAddr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != N {
+		t.Fatalf("Tried to upload %d bytes, but only sent %d", N, n)
+	}
+
+	up2 := ss.MakeTestPayload(N + 1)
+	n, err = conn2.WriteTo(up2, echoConn.LocalAddr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != N+1 {
+		t.Fatalf("Tried to upload %d bytes, but only sent %d", N+1, n)
+	}
+
+	down := make([]byte, N+1)
+	n, addr, err := conn1.ReadFrom(down)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != N {
+		t.Errorf("Tried to download %d bytes, but only received %d", N, n)
+	}
+	if addr.String() != echoConn.LocalAddr().String() {
+		t.Errorf("Reported address mismatch: %s != %s", addr.String(), echoConn.LocalAddr().String())
+	}
+
+	if !bytes.Equal(up1, down[:n]) {
+		t.Fatal("Echo mismatch")
+	}
+
+	n, addr, err = conn2.ReadFrom(down)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != N+1 {
+		t.Errorf("Tried to download %d bytes, but only received %d", N+1, n)
+	}
+	if addr.String() != echoConn.LocalAddr().String() {
+		t.Errorf("Reported address mismatch: %s != %s", addr.String(), echoConn.LocalAddr().String())
+	}
+
+	if !bytes.Equal(up2, down) {
+		t.Fatal("Echo mismatch")
+	}
+
+	conn1.Close()
+	conn2.Close()
+	echoConn.Close()
+	echoRunning.Wait()
+	proxy.GracefulStop()
+	// Verify that the expected number of metrics were reported.
+	if testMetrics.natAdded != 2 {
+		t.Errorf("Wrong NAT add count: %d", testMetrics.natAdded)
+	}
+	if len(testMetrics.up) != 2 {
+		t.Errorf("Wrong number of packets sent: %v", testMetrics.up)
+	}
+	if len(testMetrics.down) != 2 {
+		t.Errorf("Wrong number of packets received: %v", testMetrics.down)
 	}
 }
 
@@ -496,7 +608,7 @@ func BenchmarkTCPMultiplexing(b *testing.B) {
 func BenchmarkUDPEcho(b *testing.B) {
 	echoConn, echoRunning := startUDPEchoServer(b)
 
-	proxyConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	proxyConn, err := onet.ListenAnyUDP4(0)
 	if err != nil {
 		b.Fatalf("ListenTCP failed: %v", err)
 	}
@@ -544,7 +656,7 @@ func BenchmarkUDPEcho(b *testing.B) {
 func BenchmarkUDPManyKeys(b *testing.B) {
 	echoConn, echoRunning := startUDPEchoServer(b)
 
-	proxyConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	proxyConn, err := onet.ListenAnyUDP4(0)
 	if err != nil {
 		b.Fatalf("ListenTCP failed: %v", err)
 	}

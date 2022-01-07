@@ -28,6 +28,7 @@ import (
 	"syscall"
 	"time"
 
+	onet "github.com/Jigsaw-Code/outline-ss-server/net"
 	"github.com/Jigsaw-Code/outline-ss-server/service"
 	"github.com/Jigsaw-Code/outline-ss-server/service/metrics"
 	ss "github.com/Jigsaw-Code/outline-ss-server/shadowsocks"
@@ -62,10 +63,10 @@ func init() {
 }
 
 type ssPort struct {
-	tcpService service.TCPService
+	tcpService  service.TCPService
 	udp4Service service.UDPService
 	udp6Service service.UDPService
-	cipherList service.CipherList
+	cipherList  service.CipherList
 }
 
 type SSServer struct {
@@ -80,8 +81,8 @@ func (s *SSServer) startPort(portNum int) error {
 	if err != nil {
 		return fmt.Errorf("Failed to start TCP on port %v: %v", portNum, err)
 	}
-	udp4Conn, udp4err := net.ListenUDP("udp4", &net.UDPAddr{Port: portNum})
-	udp6Conn, udp6err := net.ListenUDP("udp6", &net.UDPAddr{Port: portNum})
+	udp4Conn, udp4err := onet.ListenAnyUDP4(portNum)
+	udp6Conn, udp6err := onet.ListenAnyUDP6(portNum)
 	if udp4err != nil && udp6err != nil {
 		return fmt.Errorf("Failed to start UDP on port %v: %v", portNum, udp4err)
 	}
@@ -118,11 +119,9 @@ func (s *SSServer) removePort(portNum int) error {
 	delete(s.ports, portNum)
 	if tcpErr != nil {
 		return fmt.Errorf("Failed to close listener on %v: %v", portNum, tcpErr)
-	}
-	if udp4Err != nil {
+	} else if udp4Err != nil {
 		return fmt.Errorf("Failed to stop IPv4 UDP service on %v: %v", portNum, udp4Err)
-	}
-	if udp4Err != nil {
+	} else if udp6Err != nil {
 		return fmt.Errorf("Failed to stop IPv6 UDP service on %v: %v", portNum, udp6Err)
 	}
 	logger.Infof("Stopped TCP and UDP on port %v", portNum)
