@@ -233,6 +233,7 @@ type udpRecord struct {
 type fakeUDPMetrics struct {
 	metrics.ShadowsocksMetrics
 	fakeLocation string
+	mu           sync.Mutex
 	up, down     []udpRecord
 	natAdded     int
 }
@@ -241,13 +242,19 @@ func (m *fakeUDPMetrics) GetLocation(addr net.Addr) (string, error) {
 	return m.fakeLocation, nil
 }
 func (m *fakeUDPMetrics) AddUDPPacketFromClient(clientLocation, accessKey, status string, clientProxyBytes, proxyTargetBytes int, timeToCipher time.Duration) {
+	m.mu.Lock()
 	m.up = append(m.up, udpRecord{clientLocation, accessKey, status, clientProxyBytes, proxyTargetBytes})
+	m.mu.Unlock()
 }
 func (m *fakeUDPMetrics) AddUDPPacketFromTarget(clientLocation, accessKey, status string, targetProxyBytes, proxyClientBytes int) {
+	m.mu.Lock()
 	m.down = append(m.down, udpRecord{clientLocation, accessKey, status, targetProxyBytes, proxyClientBytes})
+	m.mu.Unlock()
 }
 func (m *fakeUDPMetrics) AddUDPNatEntry() {
+	m.mu.Lock()
 	m.natAdded++
+	m.mu.Unlock()
 }
 func (m *fakeUDPMetrics) RemoveUDPNatEntry() {
 	// Not tested because it requires waiting for a long timeout.
