@@ -12,10 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build darwin || linux
+
 package net
 
 import (
 	"errors"
+	"io"
 	"net"
 	"runtime"
 
@@ -112,4 +115,20 @@ func (c *udpAnyConnV6) ReadToFrom(p []byte) (n int, src *net.UDPAddr, dst net.IP
 func (c *udpAnyConnV6) WriteToFrom(p []byte, dst *net.UDPAddr, src net.IP) (int, error) {
 	cm := &ipv6.ControlMessage{Src: src}
 	return c.v6.WriteTo(p, cm, dst)
+}
+
+type boundWriter struct {
+	conn UDPAnyConn
+	dst *net.UDPAddr
+	src net.IP
+}
+
+func (w boundWriter) Write(p []byte) (int, error) {
+	return w.conn.WriteToFrom(p, w.dst, w.src)
+}
+
+// MakeBoundWriter returns a Writer that mimics the behavior of Write() on a
+// connected UDPConn.
+func MakeBoundWriter(conn UDPAnyConn, dst *net.UDPAddr, src net.IP) io.Writer {
+	return boundWriter{conn, dst, src}
 }

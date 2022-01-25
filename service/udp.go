@@ -17,6 +17,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"runtime/debug"
 	"sync"
@@ -398,10 +399,13 @@ func (m *natmap) Add(clientAddr *net.UDPAddr, proxyIP net.IP, clientConn onet.UD
 	key := makeNATKey(clientAddr, proxyIP)
 	entry := m.set(key, targetConn, cipher, keyID, clientLocation)
 
+	boundWriter := onet.MakeBoundWriter(clientConn, clientAddr, proxyIP)
+	ssWriter := makeShadowsocksUDPWriter(boundWriter, cipher)
+
 	m.metrics.AddUDPNatEntry()
 	m.running.Add(1)
 	go func() {
-		timedCopy(clientAddr, proxyIP, clientConn, entry, keyID, m.metrics)
+		copyUntilTimeout(ssWriter, entry, keyID, m.metrics, clientAddr)
 		m.metrics.RemoveUDPNatEntry()
 		if pc := m.del(key); pc != nil {
 			pc.Close()
@@ -430,75 +434,84 @@ func (m *natmap) Close() error {
 var maxAddrLen int = len(socks.ParseAddr("[2001:db8::1]:12345"))
 
 // copy from target to client until read timeout
-func timedCopy(clientAddr *net.UDPAddr, proxyIP net.IP, clientConn onet.UDPAnyConn, targetConn *natconn,
-	keyID string, sm metrics.ShadowsocksMetrics) {
-	// pkt is used for in-place encryption of downstream UDP packets, with the layout
-	// [padding?][salt][address][body][tag][extra]
-	// Padding is only used if the address is IPv4.
-	pkt := make([]byte, serverUDPBufferSize)
-
-	saltSize := targetConn.cipher.SaltSize()
-	// Leave enough room at the beginning of the packet for a max-length header (i.e. IPv6).
-	bodyStart := saltSize + maxAddrLen
-
-	expired := false
+func copyUntilTimeout(ssWriter shadowsocksUDPWriter, targetConn *natconn,
+	keyID string, sm metrics.ShadowsocksMetrics, clientAddr *net.UDPAddr) {
 	for {
-		var bodyLen, proxyClientBytes int
-		connError := func() (connError *onet.ConnectionError) {
-			var (
-				raddr net.Addr
-				err   error
-			)
-			// `readBuf` receives the plaintext body in `pkt`:
-			// [padding?][salt][address][body][tag][unused]
-			// |--     bodyStart     --|[      readBuf    ]
-			readBuf := pkt[bodyStart:]
-			bodyLen, raddr, err = targetConn.ReadFrom(readBuf)
-			if err != nil {
-				if netErr, ok := err.(net.Error); ok {
-					if netErr.Timeout() {
-						expired = true
-						return nil
-					}
-				}
-				return onet.NewConnectionError("ERR_READ", "Failed to read from target", err)
-			}
-
-			debugUDPAddr(clientAddr, "Got response from %v", raddr)
-			srcAddr := socks.ParseAddr(raddr.String())
-			addrStart := bodyStart - len(srcAddr)
-			// `plainTextBuf` concatenates the SOCKS address and body:
-			// [padding?][salt][address][body][tag][unused]
-			// |-- addrStart -|[plaintextBuf ]
-			plaintextBuf := pkt[addrStart : bodyStart+bodyLen]
-			copy(plaintextBuf, srcAddr)
-
-			// saltStart is 0 if raddr is IPv6.
-			saltStart := addrStart - saltSize
-			// `packBuf` adds space for the salt and tag.
-			// `buf` shows the space that was used.
-			// [padding?][salt][address][body][tag][unused]
-			//           [            packBuf             ]
-			//           [          buf           ]
-			packBuf := pkt[saltStart:]
-			buf, err := ss.Pack(packBuf, plaintextBuf, targetConn.cipher) // Encrypt in-place
-			if err != nil {
-				return onet.NewConnectionError("ERR_PACK", "Failed to pack data to client", err)
-			}
-			proxyClientBytes, err = clientConn.WriteToFrom(buf, clientAddr, proxyIP)
-			if err != nil {
-				return onet.NewConnectionError("ERR_WRITE", "Failed to write to client", err)
-			}
-			return nil
-		}()
+		bodyLen, proxyClientBytes, raddr, connError := ssWriter.ReadPacketFrom(targetConn)
 		status := "OK"
 		if connError != nil {
 			logger.Debugf("UDP Error: %v: %v", connError.Message, connError.Cause)
 			status = connError.Status
+			if status == "ERR_READ" {
+				if netErr, ok := connError.Cause.(net.Error); ok && netErr.Timeout() {
+					break
+				}
+			}
 		}
-		if expired {
-			break
-		}
+		debugUDPAddr(clientAddr, "Got response from (%v)", raddr)
 		sm.AddUDPPacketFromTarget(targetConn.clientLocation, keyID, status, bodyLen, proxyClientBytes)
 	}
+}
+
+// Represents net.PacketConn.ReadFrom.
+type packetReader interface {
+	ReadFrom(p []byte) (int, net.Addr, error)
+}
+
+// Parallel to ss.ShadowsocksWriter, but for UDP.
+type shadowsocksUDPWriter struct {
+	clientWriter io.Writer
+	cipher       *ss.Cipher
+	pkt          [serverUDPBufferSize]byte
+}
+
+func makeShadowsocksUDPWriter(clientWriter io.Writer, cipher *ss.Cipher) shadowsocksUDPWriter {
+	return shadowsocksUDPWriter{
+		clientWriter: clientWriter,
+		cipher:       cipher,
+	}
+}
+
+// ReadPacketFrom reads one plaintext packet from `r`, encodes it for shadowsocks,
+// and sends it to the client.  It returns the number of bytes read and written and
+// the source address of the packet, or an error.
+func (w *shadowsocksUDPWriter) ReadPacketFrom(r packetReader) (readLen int, writeLen int, raddr net.Addr, connErr *onet.ConnectionError) {
+	saltSize := w.cipher.SaltSize()
+	bodyStart := saltSize + maxAddrLen
+	// `readBuf` receives the plaintext body in `pkt`:
+	// [padding?][salt][address][body][tag][unused]
+	// |--     bodyStart     --|[      readBuf    ]
+	readBuf := w.pkt[bodyStart:]
+	var err error
+	if readLen, raddr, err = r.ReadFrom(readBuf); err != nil {
+		connErr = onet.NewConnectionError("ERR_READ", "Failed to read from target", err)
+		return
+	}
+
+	srcAddr := socks.ParseAddr(raddr.String())
+	addrStart := bodyStart - len(srcAddr)
+	// `plainTextBuf` concatenates the SOCKS address and body:
+	// [padding?][salt][address][body][tag][unused]
+	// |-- addrStart -|[plaintextBuf ]
+	plaintextBuf := w.pkt[addrStart : bodyStart+readLen]
+	copy(plaintextBuf, srcAddr)
+
+	// saltStart is 0 if raddr is IPv6.
+	saltStart := addrStart - saltSize
+	// `packBuf` adds space for the salt and tag.
+	// `buf` shows the space that was used.
+	// [padding?][salt][address][body][tag][unused]
+	//           [            packBuf             ]
+	//           [          buf           ]
+	packBuf := w.pkt[saltStart:]
+	buf, err := ss.Pack(packBuf, plaintextBuf, w.cipher) // Encrypt in-place
+	if err != nil {
+		connErr = onet.NewConnectionError("ERR_PACK", "Failed to pack data to client", err)
+		return
+	}
+	if writeLen, err = w.clientWriter.Write(buf); err != nil {
+		connErr = onet.NewConnectionError("ERR_WRITE", "Failed to write to client", err)
+		return
+	}
+	return
 }
