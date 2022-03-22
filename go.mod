@@ -12,6 +12,12 @@ require (
 )
 
 require (
+	github.com/coreos/go-systemd/v22 v22.3.2 // indirect
+	golang.org/x/net v0.1.0 // indirect
+	golang.org/x/text v0.4.0 // indirect
+)
+
+require (
 	cloud.google.com/go v0.103.0 // indirect
 	cloud.google.com/go/compute v1.7.0 // indirect
 	cloud.google.com/go/iam v0.3.0 // indirect
@@ -155,12 +161,10 @@ require (
 	gitlab.com/digitalxero/go-conventional-commit v1.0.7 // indirect
 	go.opencensus.io v0.23.0 // indirect
 	gocloud.dev v0.27.0 // indirect
-	golang.org/x/net v0.1.0 // indirect
 	golang.org/x/oauth2 v0.0.0-20220722155238-128564f6959c // indirect
 	golang.org/x/sync v0.0.0-20220722155255-886fb9371eb4 // indirect
 	golang.org/x/sys v0.1.0 // indirect
 	golang.org/x/term v0.1.0 // indirect
-	golang.org/x/text v0.4.0 // indirect
 	golang.org/x/time v0.0.0-20220722155302-e5dcc9cfc0b9 // indirect
 	golang.org/x/xerrors v0.0.0-20220609144429-65e65417b02f // indirect
 	google.golang.org/api v0.91.0 // indirect
@@ -172,6 +176,7 @@ require (
 	gopkg.in/mail.v2 v2.3.1 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
+	stingr.net/go/systemdutil v0.0.0-20210311175859-735e4cc44e94
 )
 
 go 1.19

@@ -37,6 +37,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/crypto/ssh/terminal"
 	"gopkg.in/yaml.v2"
+	"stingr.net/go/systemdutil"
 )
 
 var logger *logging.Logger
@@ -67,14 +68,68 @@ type ssPort struct {
 	cipherList service.CipherList
 }
 
+type systemdPort struct {
+	tcpPorts []*net.TCPListener
+	udpPorts []*net.UDPConn
+
+	tcpServices []service.TCPService
+	udpServices []service.UDPService
+	cipherList  service.CipherList
+}
+
 type SSServer struct {
 	natTimeout  time.Duration
 	m           metrics.ShadowsocksMetrics
 	replayCache service.ReplayCache
 	ports       map[int]*ssPort
+
+	systemdPort *systemdPort
+}
+
+func (s *SSServer) startSystemdPort() error {
+	udps, tcps, err := systemdutil.ListenSystemdEx(systemdutil.ActivationFiles())
+	if err != nil {
+		return err
+	}
+
+	var ss systemdPort
+	for _, v := range udps {
+		if x, ok := v.(*net.UDPConn); ok {
+			ss.udpPorts = append(ss.udpPorts, x)
+		}
+	}
+	for _, v := range tcps {
+		if x, ok := v.(*net.TCPListener); ok {
+			ss.tcpPorts = append(ss.tcpPorts, x)
+		}
+	}
+
+	if len(ss.tcpPorts) != 0 || len(ss.udpPorts) != 0 {
+		s.systemdPort = &ss
+		ss.cipherList = service.NewCipherList()
+		for _, v := range ss.tcpPorts {
+			logger.Infof("Listening on TCP systemd port %v", v)
+			ts := service.NewTCPService(ss.cipherList, &s.replayCache, s.m, tcpReadTimeout)
+			go ts.Serve(v)
+			ss.tcpServices = append(ss.tcpServices, ts)
+		}
+		for _, v := range ss.udpPorts {
+			logger.Infof("Listening on UDP systemd port %v", v)
+			us := service.NewUDPService(s.natTimeout, ss.cipherList, s.m)
+			go us.Serve(v)
+			ss.udpServices = append(ss.udpServices, us)
+		}
+	}
+	return nil
 }
 
 func (s *SSServer) startPort(portNum int) error {
+	if portNum < 0 || portNum > 65535 {
+		return fmt.Errorf("invalid port: %d", portNum)
+	}
+	if portNum == 0 {
+		return nil
+	}
 	listener, err := net.ListenTCP("tcp", &net.TCPAddr{Port: portNum})
 	if err != nil {
 		return fmt.Errorf("Failed to start TCP on port %v: %v", portNum, err)
@@ -95,6 +150,12 @@ func (s *SSServer) startPort(portNum int) error {
 }
 
 func (s *SSServer) removePort(portNum int) error {
+	if portNum < 0 || portNum > 65535 {
+		return fmt.Errorf("invalid port: %d", portNum)
+	}
+	if portNum == 0 {
+		return nil
+	}
 	port, ok := s.ports[portNum]
 	if !ok {
 		return fmt.Errorf("Port %v doesn't exist", portNum)
@@ -149,7 +210,11 @@ func (s *SSServer) loadConfig(filename string) error {
 		}
 	}
 	for portNum, cipherList := range portCiphers {
-		s.ports[portNum].cipherList.Update(cipherList)
+		if portNum == 0 {
+			s.systemdPort.cipherList.Update(cipherList)
+		} else {
+			s.ports[portNum].cipherList.Update(cipherList)
+		}
 	}
 	logger.Infof("Loaded %v access keys", len(config.Keys))
 	s.m.SetNumAccessKeys(len(config.Keys), len(portCiphers))
@@ -173,6 +238,9 @@ func RunSSServer(filename string, natTimeout time.Duration, sm metrics.Shadowsoc
 		m:           sm,
 		replayCache: service.NewReplayCache(replayHistory),
 		ports:       make(map[int]*ssPort),
+	}
+	if err := server.startSystemdPort(); err != nil {
+		return nil, err
 	}
 	err := server.loadConfig(filename)
 	if err != nil {
@@ -235,6 +303,8 @@ func main() {
 	} else {
 		logging.SetLevel(logging.INFO, "")
 	}
+
+	systemdutil.Init()
 
 	if flags.Version {
 		fmt.Println(version)
