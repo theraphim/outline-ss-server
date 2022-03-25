@@ -313,6 +313,8 @@ func main() {
 		return
 	}
 
+	fmt.Printf("%v\n", os.Environ())
+
 	if flags.ConfigFile == "" {
 		if x := os.Getenv("CONFIGURATION_DIRECTORY"); x != "" {
 			flags.ConfigFile = filepath.Join(x, "config.yml")
