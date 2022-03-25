@@ -318,6 +318,8 @@ func main() {
 	if flags.ConfigFile == "" {
 		if x := os.Getenv("CONFIGURATION_DIRECTORY"); x != "" {
 			flags.ConfigFile = filepath.Join(x, "config.yml")
+		} else if os.Getenv("LISTEN_PID") != "" {
+			flags.ConfigFile = "/etc/outline-ss-server/config.yml"
 		} else {
 			flag.Usage()
 			return
