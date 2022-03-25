@@ -1,0 +1,9 @@
+[Unit]
+Description=Outline server
+
+[Socket]
+ListenStream=443
+ListenDatagram=443
+
+[Install]
+WantedBy=sockets.target

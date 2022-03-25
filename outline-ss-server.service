@@ -1,0 +1,17 @@
+[Unit]
+Description=Outline server
+After=local-fs.target outline-ss-server.socket network.target
+Requires=outline-ss-server.socket
+
+[Service]
+Type=notify
+EnvironmentFile=-/etc/sysconfig/outline-ss-server
+ExecStart=/usr/bin/outline-ss-server
+ConfigurationDirectory=outline-ss-server
+DynamicUser=yes
+Restart=on-failure
+LimitNOFILE=655360
+
+[Install]
+WantedBy=multi-user.target
+Also=outline-ss-server.socket

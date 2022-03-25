@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -312,8 +313,12 @@ func main() {
 	}
 
 	if flags.ConfigFile == "" {
-		flag.Usage()
-		return
+		if x := os.Getenv("CONFIGURATION_DIRECTORY"); x != "" {
+			flags.ConfigFile = filepath.Join(x, "config.yml")
+		} else {
+			flag.Usage()
+			return
+		}
 	}
 
 	if flags.MetricsAddr != "" {
@@ -326,6 +331,11 @@ func main() {
 
 	var ipCountryDB *geoip2.Reader
 	var err error
+
+	if flags.IPCountryDB == "" {
+		flags.IPCountryDB = os.Getenv("OUTLINE_IP_COUNTRY_DB")
+	}
+
 	if flags.IPCountryDB != "" {
 		logger.Infof("Using IP-Country database at %v", flags.IPCountryDB)
 		ipCountryDB, err = geoip2.Open(flags.IPCountryDB)
