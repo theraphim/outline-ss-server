@@ -32,6 +32,7 @@ import (
 	"github.com/Jigsaw-Code/outline-ss-server/service"
 	"github.com/Jigsaw-Code/outline-ss-server/service/metrics"
 	ss "github.com/Jigsaw-Code/outline-ss-server/shadowsocks"
+	"github.com/coreos/go-systemd/v22/daemon"
 	"github.com/op/go-logging"
 	"github.com/oschwald/geoip2-golang"
 	"github.com/prometheus/client_golang/prometheus"
@@ -351,7 +352,12 @@ func main() {
 		logger.Fatal(err)
 	}
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
+	daemon.SdNotify(false, daemon.SdNotifyReady)
+	defer daemon.SdNotify(false, daemon.SdNotifyStopping)
+
+	systemdutil.WaitSigint()
+
+	// sigCh := make(chan os.Signal, 1)
+	// signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	// <-sigCh
 }
