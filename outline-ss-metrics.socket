@@ -3,7 +3,7 @@ Description=Outline server metrics
 
 [Socket]
 ListenStream=9180
-Service=outline-ss-server
+Service=outline-ss-server.service
 
 [Install]
 WantedBy=sockets.target
