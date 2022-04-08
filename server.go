@@ -342,8 +342,11 @@ func main() {
 
 	systemdEnv := prepareSystemdEnvironment()
 
-	if flags.MetricsAddr != "" {
+	if flags.MetricsAddr != "" || len(systemdEnv.statusPorts) != 0 {
 		http.Handle("/metrics", promhttp.Handler())
+	}
+
+	if flags.MetricsAddr != "" {
 		go func() {
 			logger.Fatal(http.ListenAndServe(flags.MetricsAddr, nil))
 		}()
