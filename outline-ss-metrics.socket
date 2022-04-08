@@ -1,0 +1,8 @@
+[Unit]
+Description=Outline server metrics
+
+[Socket]
+ListenStream=9180
+
+[Install]
+WantedBy=sockets.target

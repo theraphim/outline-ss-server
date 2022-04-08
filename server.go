@@ -88,22 +88,10 @@ type SSServer struct {
 	systemdPort *systemdPort
 }
 
-func (s *SSServer) startSystemdPort() error {
-	udps, tcps, err := systemdutil.ListenSystemdEx(systemdutil.ActivationFiles())
-	if err != nil {
-		return err
-	}
-
-	var ss systemdPort
-	for _, v := range udps {
-		if x, ok := v.(*net.UDPConn); ok {
-			ss.udpPorts = append(ss.udpPorts, x)
-		}
-	}
-	for _, v := range tcps {
-		if x, ok := v.(*net.TCPListener); ok {
-			ss.tcpPorts = append(ss.tcpPorts, x)
-		}
+func (s *SSServer) startSystemdPort(ssEnv systemdSockets) error {
+	ss := systemdPort{
+		tcpPorts: ssEnv.tcpPorts,
+		udpPorts: ssEnv.udpPorts,
 	}
 
 	if len(ss.tcpPorts) != 0 || len(ss.udpPorts) != 0 {
@@ -234,14 +222,14 @@ func (s *SSServer) Stop() error {
 }
 
 // RunSSServer starts a shadowsocks server running, and returns the server or an error.
-func RunSSServer(filename string, natTimeout time.Duration, sm metrics.ShadowsocksMetrics, replayHistory int) (*SSServer, error) {
+func RunSSServer(filename string, natTimeout time.Duration, sm metrics.ShadowsocksMetrics, replayHistory int, ssEnv systemdSockets) (*SSServer, error) {
 	server := &SSServer{
 		natTimeout:  natTimeout,
 		m:           sm,
 		replayCache: service.NewReplayCache(replayHistory),
 		ports:       make(map[int]*ssPort),
 	}
-	if err := server.startSystemdPort(); err != nil {
+	if err := server.startSystemdPort(ssEnv); err != nil {
 		return nil, err
 	}
 	err := server.loadConfig(filename)
@@ -280,6 +268,34 @@ func readConfig(filename string) (*Config, error) {
 	return &config, err
 }
 
+type systemdSockets struct {
+	udpPorts []*net.UDPConn
+	tcpPorts []*net.TCPListener
+
+	statusPorts []*net.TCPListener
+}
+
+func prepareSystemdEnvironment() (ss systemdSockets) {
+	wrapped := systemdutil.WrapSystemdSockets(systemdutil.ActivationFiles())
+
+	for _, v := range wrapped {
+		if v.Tcp != nil {
+			if x, ok := v.Tcp.(*net.TCPListener); ok {
+				if strings.HasPrefix(v.Name, "outline-ss-metrics") {
+					ss.statusPorts = append(ss.statusPorts, x)
+				} else {
+					ss.tcpPorts = append(ss.tcpPorts, x)
+				}
+			}
+		} else if v.Udp != nil {
+			if x, ok := v.Udp.(*net.UDPConn); ok {
+				ss.udpPorts = append(ss.udpPorts, x)
+			}
+		}
+	}
+	return ss
+}
+
 func main() {
 	var flags struct {
 		ConfigFile    string
@@ -313,8 +329,6 @@ func main() {
 		return
 	}
 
-	fmt.Printf("%v\n", os.Environ())
-
 	if flags.ConfigFile == "" {
 		if x := os.Getenv("CONFIGURATION_DIRECTORY"); x != "" {
 			flags.ConfigFile = filepath.Join(x, "config.yml")
@@ -326,12 +340,23 @@ func main() {
 		}
 	}
 
+	systemdEnv := prepareSystemdEnvironment()
+
 	if flags.MetricsAddr != "" {
 		http.Handle("/metrics", promhttp.Handler())
 		go func() {
 			logger.Fatal(http.ListenAndServe(flags.MetricsAddr, nil))
 		}()
 		logger.Infof("Metrics on http://%v/metrics", flags.MetricsAddr)
+	}
+
+	if len(systemdEnv.statusPorts) != 0 {
+		for _, v := range systemdEnv.statusPorts {
+			v := v
+			go func() {
+				logger.Fatal(http.Serve(v, nil))
+			}()
+		}
 	}
 
 	var ipCountryDB *geoip2.Reader
@@ -351,7 +376,7 @@ func main() {
 	}
 	m := metrics.NewPrometheusShadowsocksMetrics(ipCountryDB, prometheus.DefaultRegisterer)
 	m.SetBuildInfo(version)
-	_, err = RunSSServer(flags.ConfigFile, flags.natTimeout, m, flags.replayHistory)
+	_, err = RunSSServer(flags.ConfigFile, flags.natTimeout, m, flags.replayHistory, systemdEnv)
 	if err != nil {
 		logger.Fatal(err)
 	}

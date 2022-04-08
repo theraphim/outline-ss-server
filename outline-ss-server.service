@@ -1,7 +1,7 @@
 [Unit]
 Description=Outline server
-After=local-fs.target outline-ss-server.socket network.target
-Requires=outline-ss-server.socket
+After=local-fs.target outline-ss-server.socket outline-ss-metrics.socket network.target
+Requires=outline-ss-server.socket outline-ss-metrics.socket
 
 [Service]
 Type=notify
@@ -16,4 +16,4 @@ LimitNOFILE=655360
 
 [Install]
 WantedBy=multi-user.target
-Also=outline-ss-server.socket
+Also=outline-ss-server.socket outline-ss-metrics.socket
