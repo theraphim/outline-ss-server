@@ -2,10 +2,8 @@
 Description=Outline server
 
 [Socket]
-ListenStream=443
-ListenDatagram=443
-ListenStream=4433
-ListenDatagram=4433
+ListenStream=64099
+ListenDatagram=64099
 
 [Install]
 WantedBy=sockets.target
