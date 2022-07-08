@@ -1,3 +1,4 @@
+%define debug_package %{nil}
 %global gomodulesmode GO111MODULE=auto
 
 Name:		outline-ss-server
@@ -29,7 +30,6 @@ Outline server but NOT IN DOCKER
 %setup -q
 
 %build
-export LDFLAGS=""
 %gobuild -o bin/outline-ss-server github.com/Jigsaw-Code/outline-ss-server
 
 %install
