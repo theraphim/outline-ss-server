@@ -2,7 +2,7 @@
 Description=Outline server metrics
 
 [Socket]
-ListenStream=64100
+ListenStream=41332
 Service=outline-ss-server.service
 
 [Install]
