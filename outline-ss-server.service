@@ -13,6 +13,7 @@ Group=outline-ss-server
 DynamicUser=yes
 Restart=on-failure
 LimitNOFILE=655360
+ExecReload=kill -HUP $MAINPID
 
 [Install]
 WantedBy=multi-user.target
