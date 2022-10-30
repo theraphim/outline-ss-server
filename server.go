@@ -38,7 +38,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/crypto/ssh/terminal"
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 	"stingr.net/go/systemdutil"
 )
 
@@ -388,8 +388,4 @@ func main() {
 	defer daemon.SdNotify(false, daemon.SdNotifyStopping)
 
 	systemdutil.WaitSigint()
-
-	// sigCh := make(chan os.Signal, 1)
-	// signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	// <-sigCh
 }
