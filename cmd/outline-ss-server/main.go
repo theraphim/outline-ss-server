@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"github.com/Jigsaw-Code/outline-sdk/transport/shadowsocks"
 	"github.com/Jigsaw-Code/outline-ss-server/ipinfo"
 	"github.com/Jigsaw-Code/outline-ss-server/service"
+	"github.com/coreos/go-systemd/v22/daemon"
 	"github.com/op/go-logging"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -258,8 +260,14 @@ func main() {
 	}
 
 	if flags.ConfigFile == "" {
-		flag.Usage()
-		return
+		if x := os.Getenv("CONFIGURATION_DIRECTORY"); x != "" {
+			flags.ConfigFile = filepath.Join(x, "config.yml")
+		} else if os.Getenv("LISTEN_PID") != "" {
+			flags.ConfigFile = "/etc/outline-ss-server/config.yml"
+		} else {
+			flag.Usage()
+			return
+		}
 	}
 
 	if flags.MetricsAddr != "" {
@@ -289,6 +297,9 @@ func main() {
 	if err != nil {
 		logger.Fatalf("Server failed to start: %v. Aborting", err)
 	}
+
+	daemon.SdNotify(false, daemon.SdNotifyReady)
+	defer daemon.SdNotify(false, daemon.SdNotifyStopping)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

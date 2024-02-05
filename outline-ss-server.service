@@ -1,0 +1,18 @@
+[Unit]
+Description=Outline server
+After=local-fs.target network.target
+
+[Service]
+Type=notify
+EnvironmentFile=-/etc/sysconfig/outline-ss-server
+ExecStart=/usr/bin/outline-ss-server -metrics=${OUTLINE_METRICS_ADDR}
+ConfigurationDirectory=outline-ss-server
+User=outline-ss-server
+Group=outline-ss-server
+DynamicUser=yes
+Restart=on-failure
+LimitNOFILE=655360
+ExecReload=kill -HUP $MAINPID
+
+[Install]
+WantedBy=multi-user.target
