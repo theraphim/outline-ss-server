@@ -40,7 +40,7 @@ Outline server but NOT IN DOCKER
 %{__install} -d $RPM_BUILD_ROOT%{_sysconfdir}/sysconfig
 %{__install} -m 644 -T %{name}.sysconfig %{buildroot}%{_sysconfdir}/sysconfig/%{name}
 %{__install} -d $RPM_BUILD_ROOT%{_sysconfdir}/outline-ss-server
-%{__install} -m 644 -T config_example.yml %{buildroot}%{_sysconfdir}/outline-ss-server/config.yml
+%{__install} -m 644 -T cmd/outline-ss-server/config_example.yml %{buildroot}%{_sysconfdir}/outline-ss-server/config.yml
 
 %files
 %{_bindir}/%{name}
