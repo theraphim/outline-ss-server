@@ -5,7 +5,7 @@ After=local-fs.target network.target
 [Service]
 Type=notify
 EnvironmentFile=-/etc/sysconfig/outline-ss-server
-ExecStart=/usr/bin/outline-ss-server -metrics=${OUTLINE_METRICS_ADDR}
+ExecStart=/usr/bin/outline-ss-server -metrics=${OUTLINE_METRICS_ADDR} -replay_history=${OUTLINE_REPLAY_HISTORY}
 ConfigurationDirectory=outline-ss-server
 User=outline-ss-server
 Group=outline-ss-server
