@@ -36,7 +36,7 @@ Outline server but NOT IN DOCKER
 %{__install} -d $RPM_BUILD_ROOT%{_bindir}
 %{__install} -v -D -t $RPM_BUILD_ROOT%{_bindir} bin/%{name}
 %{__install} -d $RPM_BUILD_ROOT%{_unitdir}
-%{__install} -v -D -t $RPM_BUILD_ROOT%{_unitdir} %{name}.service
+%{__install} -v -D -t $RPM_BUILD_ROOT%{_unitdir} %{name}.service %{name}@.socket outline-ss-metrics@.socket
 %{__install} -d $RPM_BUILD_ROOT%{_sysconfdir}/sysconfig
 %{__install} -m 644 -T %{name}.sysconfig %{buildroot}%{_sysconfdir}/sysconfig/%{name}
 %{__install} -d $RPM_BUILD_ROOT%{_sysconfdir}/outline-ss-server
@@ -45,6 +45,8 @@ Outline server but NOT IN DOCKER
 %files
 %{_bindir}/%{name}
 %{_unitdir}/%{name}.service
+%{_unitdir}/%{name}@.socket
+%{_unitdir}/outline-ss-metrics@.socket
 %config(noreplace) %{_sysconfdir}/sysconfig/%{name}
 %config(noreplace) %{_sysconfdir}/outline-ss-server/config.yml
 

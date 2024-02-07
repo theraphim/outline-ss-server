@@ -130,6 +130,7 @@ type tcpHandler struct {
 
 // NewTCPService creates a TCPService
 // `replayCache` is a pointer to SSServer.replayCache, to share the cache among all ports.
+// port is only used for metrics, so it's safe to set it to 0 for systemd-activated services.
 func NewTCPHandler(port int, ciphers CipherList, replayCache *ReplayCache, m TCPMetrics, timeout time.Duration) TCPHandler {
 	return &tcpHandler{
 		port:              port,

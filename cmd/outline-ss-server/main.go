@@ -37,6 +37,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/term"
 	"gopkg.in/yaml.v2"
+	"stingr.net/go/systemdutil"
 )
 
 var logger *logging.Logger
@@ -67,11 +68,79 @@ type ssPort struct {
 	cipherList  service.CipherList
 }
 
+type systemdPort struct {
+	tcpPorts []*net.TCPListener
+	udpPorts []*net.UDPConn
+
+	cipherList service.CipherList
+}
+
 type SSServer struct {
 	natTimeout  time.Duration
 	m           *outlineMetrics
 	replayCache service.ReplayCache
 	ports       map[int]*ssPort
+	systemdPort *systemdPort
+}
+
+func (s *SSServer) startSystemdPort(ssEnv systemdSockets) error {
+	if len(ssEnv.tcpPorts) == 0 && len(ssEnv.udpPorts) == 0 {
+		return nil
+	}
+
+	ss := systemdPort{
+		tcpPorts: ssEnv.tcpPorts,
+		udpPorts: ssEnv.udpPorts,
+	}
+	s.systemdPort = &ss
+	ss.cipherList = service.NewCipherList()
+	for _, v := range ss.tcpPorts {
+		logger.Infof("Listening on TCP systemd port %v", v)
+
+		tcpHandler := service.NewTCPHandler(0, ss.cipherList, &s.replayCache, s.m, tcpReadTimeout)
+		accept := func() (transport.StreamConn, error) {
+			conn, err := v.AcceptTCP()
+			if err == nil {
+				conn.SetKeepAlive(true)
+			}
+			return conn, err
+		}
+		go service.StreamServe(accept, tcpHandler.Handle)
+	}
+	for _, v := range ss.udpPorts {
+		logger.Infof("Listening on UDP systemd port %v", v)
+		packetHandler := service.NewPacketHandler(s.natTimeout, ss.cipherList, s.m)
+		go packetHandler.Handle(v)
+	}
+	return nil
+}
+
+type systemdSockets struct {
+	udpPorts []*net.UDPConn
+	tcpPorts []*net.TCPListener
+
+	statusPorts []*net.TCPListener
+}
+
+func prepareSystemdEnvironment() (ss systemdSockets) {
+	wrapped := systemdutil.WrapSystemdSockets(systemdutil.ActivationFiles())
+
+	for _, v := range wrapped {
+		if v.Tcp != nil {
+			if x, ok := v.Tcp.(*net.TCPListener); ok {
+				if strings.HasPrefix(v.Name, "outline-ss-metrics") {
+					ss.statusPorts = append(ss.statusPorts, x)
+				} else {
+					ss.tcpPorts = append(ss.tcpPorts, x)
+				}
+			}
+		} else if v.Udp != nil {
+			if x, ok := v.Udp.(*net.UDPConn); ok {
+				ss.udpPorts = append(ss.udpPorts, x)
+			}
+		}
+	}
+	return ss
 }
 
 func (s *SSServer) startPort(portNum int) error {
@@ -105,6 +174,10 @@ func (s *SSServer) startPort(portNum int) error {
 }
 
 func (s *SSServer) removePort(portNum int) error {
+	if portNum == 0 {
+		logger.Info("Quietly refusing to remove port 0")
+		return nil
+	}
 	port, ok := s.ports[portNum]
 	if !ok {
 		return fmt.Errorf("port %v doesn't exist", portNum)
@@ -151,6 +224,9 @@ func (s *SSServer) loadConfig(filename string) error {
 		portChanges[port] = portChanges[port] - 1
 	}
 	for portNum, count := range portChanges {
+		if portNum == 0 {
+			continue
+		}
 		if count == -1 {
 			if err := s.removePort(portNum); err != nil {
 				return fmt.Errorf("failed to remove port %v: %w", portNum, err)
@@ -162,9 +238,17 @@ func (s *SSServer) loadConfig(filename string) error {
 		}
 	}
 	for portNum, cipherList := range portCiphers {
+		if portNum == 0 {
+			if s.systemdPort == nil {
+				logger.Info("Port 0 is defined in config but systemdPort is nil")
+				continue
+			}
+			s.systemdPort.cipherList.Update(cipherList)
+			continue
+		}
 		s.ports[portNum].cipherList.Update(cipherList)
 	}
-	logger.Infof("Loaded %v access keys over %v ports", len(config.Keys), len(s.ports))
+	logger.Infof("Loaded %v access keys over %v ports", len(config.Keys), len(portCiphers))
 	s.m.SetNumAccessKeys(len(config.Keys), len(portCiphers))
 	return nil
 }
@@ -270,12 +354,26 @@ func main() {
 		}
 	}
 
-	if flags.MetricsAddr != "" {
+	systemdEnv := prepareSystemdEnvironment()
+
+	if flags.MetricsAddr != "" || len(systemdEnv.statusPorts) != 0 {
 		http.Handle("/metrics", promhttp.Handler())
+	}
+
+	if flags.MetricsAddr != "" {
 		go func() {
 			logger.Fatalf("Failed to run metrics server: %v. Aborting.", http.ListenAndServe(flags.MetricsAddr, nil))
 		}()
 		logger.Infof("Prometheus metrics available at http://%v/metrics", flags.MetricsAddr)
+	}
+
+	if len(systemdEnv.statusPorts) != 0 {
+		for _, v := range systemdEnv.statusPorts {
+			v := v
+			go func() {
+				logger.Fatal(http.Serve(v, nil))
+			}()
+		}
 	}
 
 	var err error

@@ -1,0 +1,12 @@
+[Unit]
+Description=Outline server socket
+Before=outline-ss-server.service
+
+[Socket]
+ListenStream=%i
+ListenDatagram=%i
+Service=outline-ss-server.service
+
+[Install]
+WantedBy=sockets.target
+RequiredBy=outline-ss-server.service

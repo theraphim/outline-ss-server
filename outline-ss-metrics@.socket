@@ -1,0 +1,11 @@
+[Unit]
+Description=Outline metrics socket
+Before=outline-ss-server.service
+
+[Socket]
+ListenStream=%i
+Service=outline-ss-server.service
+
+[Install]
+WantedBy=sockets.target
+RequiredBy=outline-ss-server.service

@@ -254,6 +254,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	sigs.k8s.io/kind v0.17.0 // indirect
 	sigs.k8s.io/yaml v1.3.0 // indirect
+	stingr.net/go/systemdutil v0.0.0-20230307214236-cd08cface214
 )
 
 go 1.20
