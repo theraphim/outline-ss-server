@@ -264,12 +264,15 @@ func (s *SSServer) Stop() error {
 }
 
 // RunSSServer starts a shadowsocks server running, and returns the server or an error.
-func RunSSServer(filename string, natTimeout time.Duration, sm *outlineMetrics, replayHistory int) (*SSServer, error) {
+func RunSSServer(filename string, natTimeout time.Duration, sm *outlineMetrics, replayHistory int, ssEnv systemdSockets) (*SSServer, error) {
 	server := &SSServer{
 		natTimeout:  natTimeout,
 		m:           sm,
 		replayCache: service.NewReplayCache(replayHistory),
 		ports:       make(map[int]*ssPort),
+	}
+	if err := server.startSystemdPort(ssEnv); err != nil {
+		return nil, err
 	}
 	err := server.loadConfig(filename)
 	if err != nil {
@@ -391,7 +394,7 @@ func main() {
 
 	m := newPrometheusOutlineMetrics(ip2info, prometheus.DefaultRegisterer)
 	m.SetBuildInfo(version)
-	_, err = RunSSServer(flags.ConfigFile, flags.natTimeout, m, flags.replayHistory)
+	_, err = RunSSServer(flags.ConfigFile, flags.natTimeout, m, flags.replayHistory, systemdEnv)
 	if err != nil {
 		logger.Fatalf("Server failed to start: %v. Aborting", err)
 	}
